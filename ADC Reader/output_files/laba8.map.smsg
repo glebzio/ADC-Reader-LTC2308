@@ -1,0 +1,1 @@
+Info (10281): Verilog HDL Declaration information at adc_ltc2308.v(14): object "CLK_DIV" differs only in case from object "clk_div" in the same scope File: C:/Users/user/AppData/Local/quartus/laba8/adc_ltc2308.v Line: 14

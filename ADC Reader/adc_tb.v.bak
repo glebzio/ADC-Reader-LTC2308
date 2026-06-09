@@ -1,0 +1,184 @@
+`timescale 1ns/1ps
+
+module adc_tb;
+
+// -------------------------------------------------------
+// Сигналы
+// -------------------------------------------------------
+reg        clk        = 0;
+reg        reset_n    = 0;
+wire       adc_convst;
+wire       adc_sck;
+wire       adc_sdi;
+reg        adc_sdo    = 0;
+wire [11:0] result;
+wire        valid;
+wire [6:0]  SEG;
+wire [3:0]  DIG;
+
+// -------------------------------------------------------
+// Подключаем ADC контроллер
+// -------------------------------------------------------
+adc_ltc2308 u_adc (
+    .clk        (clk),
+    .reset_n    (reset_n),
+    .adc_convst (adc_convst),
+    .adc_sck    (adc_sck),
+    .adc_sdi    (adc_sdi),
+    .adc_sdo    (adc_sdo),
+    .result     (result),
+    .valid      (valid)
+);
+
+// Тактовый сигнал 50 МГц
+always #10 clk = ~clk;
+
+// -------------------------------------------------------
+// Задача: имитировать ответ ADC на SPI запрос
+// Подаём 16 бит на SDO (бит 0 = NULL, биты 1..12 = данные)
+// -------------------------------------------------------
+task send_adc_response;
+    input [11:0] adc_value;  // 12-битное значение от ADC
+    integer i;
+    reg [15:0] response;
+    begin
+        // Формат ответа LTC2308:
+        // бит 15 (первый) = NULL
+        // биты 14..3 = D11..D0 (данные MSB first)
+        // биты 2..0 = не важно
+        response = {1'b0, adc_value, 3'b000};
+
+        // Ждём начала SPI передачи (CONVST прошёл)
+        wait(adc_convst == 1);
+        wait(adc_convst == 0);
+
+        // Ждём первый такт SCK
+        wait(adc_sck == 1);
+
+        // Выдаём биты синхронно с SCK
+        for (i = 15; i >= 0; i = i - 1) begin
+            @(negedge adc_sck);  // меняем на спаде
+            adc_sdo <= response[i];
+        end
+
+        adc_sdo <= 0;
+    end
+endtask
+
+// -------------------------------------------------------
+// Главный тест
+// -------------------------------------------------------
+initial begin
+    $display("===========================================");
+    $display("  СИМУЛЯЦИЯ ADC LTC2308");
+    $display("===========================================");
+
+    // Сброс
+    reset_n = 0;
+    repeat(10) @(posedge clk);
+    reset_n = 1;
+    repeat(10) @(posedge clk);
+
+    // -----------------------------------------------
+    // Тест 1: ADC возвращает 0x000 = 0 мВ
+    // -----------------------------------------------
+    $display("");
+    $display("ТЕСТ 1: ADC = 0x000 (0 мВ, 0.000V)");
+    fork
+        send_adc_response(12'h000);
+        begin
+            wait(valid == 1);
+            @(posedge clk);
+            $display("  Результат: 0x%03X = %0d мВ",
+                     result, result);
+            if (result == 12'h000)
+                $display("  ПРОЙДЕН ✓");
+            else
+                $display("  ПРОВАЛЕН ✗ (получено 0x%03X)", result);
+        end
+    join
+
+    // -----------------------------------------------
+    // Тест 2: ADC возвращает 0xFFF = 4095 мВ ≈ 4.095V
+    // -----------------------------------------------
+    $display("");
+    $display("ТЕСТ 2: ADC = 0xFFF (4095 мВ, 4.095V)");
+    fork
+        send_adc_response(12'hFFF);
+        begin
+            wait(valid == 1);
+            @(posedge clk);
+            $display("  Результат: 0x%03X = %0d мВ",
+                     result, result);
+            if (result == 12'hFFF)
+                $display("  ПРОЙДЕН ✓");
+            else
+                $display("  ПРОВАЛЕН ✗");
+        end
+    join
+
+    // -----------------------------------------------
+    // Тест 3: ADC = 0x800 ≈ 2048 мВ ≈ 2.048V (середина)
+    // -----------------------------------------------
+    $display("");
+    $display("ТЕСТ 3: ADC = 0x800 (2048 мВ, 2.048V)");
+    fork
+        send_adc_response(12'h800);
+        begin
+            wait(valid == 1);
+            @(posedge clk);
+            $display("  Результат: 0x%03X = %0d мВ",
+                     result, result);
+            if (result == 12'h800)
+                $display("  ПРОЙДЕН ✓");
+            else
+                $display("  ПРОВАЛЕН ✗");
+        end
+    join
+
+    // -----------------------------------------------
+    // Тест 4: ADC = 3300 мВ = 3.3V (как 3.3V питание)
+    // 3300 в hex = 0xCE4
+    // -----------------------------------------------
+    $display("");
+    $display("ТЕСТ 4: ADC = 0xCE4 (3300 мВ, 3.3V)");
+    fork
+        send_adc_response(12'hCE4);
+        begin
+            wait(valid == 1);
+            @(posedge clk);
+            $display("  Результат: 0x%03X = %0d мВ",
+                     result, result);
+            if (result == 12'hCE4)
+                $display("  ПРОЙДЕН ✓");
+            else
+                $display("  ПРОВАЛЕН ✗");
+        end
+    join
+
+    $display("");
+    $display("===========================================");
+    $display("  СИМУЛЯЦИЯ ЗАВЕРШЕНА");
+    $display("===========================================");
+    #1000;
+    $stop;
+end
+
+// -------------------------------------------------------
+// Монитор SPI — печатает каждый бит SDI и SDO
+// -------------------------------------------------------
+always @(posedge adc_sck) begin
+    $display("  [SPI] SCK↑  SDI=%b  SDO=%b",
+             adc_sdi, adc_sdo);
+end
+
+// -------------------------------------------------------
+// Монитор результата
+// -------------------------------------------------------
+always @(posedge clk) begin
+    if (valid)
+        $display("  [VALID] result=0x%03X (%0d мВ)",
+                 result, result);
+end
+
+endmodule

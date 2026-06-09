@@ -1,0 +1,134 @@
+module adc_ltc2308 (
+    input  wire        clk,        // 50 МГц
+    input  wire        reset_n,
+    output reg         adc_convst, // старт конверсии
+    output reg         adc_sck,    // тактовый SPI
+    output reg         adc_sdi,    // конфиг канала → ADC
+    input  wire        adc_sdo,    // данные ← ADC
+    output reg  [11:0] result,     // 12-битный результат
+    output reg         valid       // 1 такт когда данные готовы
+);
+
+// LTC2308 требует SCK не быстрее 40 МГц
+// Делим 50 МГц на 4 = 12.5 МГц — безопасно
+parameter CLK_DIV = 2;  // половина периода SCK
+
+// Конфиг для CH0: single-ended, unipolar
+parameter CH0_CFG = 8'b11000000;
+
+// -------------------------------------------------------
+// Состояния FSM
+// -------------------------------------------------------
+parameter IDLE    = 0;
+parameter CONVST  = 1;  // импульс CONVST
+parameter WAIT    = 2;  // ждём перед SPI
+parameter TRANSFER = 3; // 16 тактов SPI
+parameter DONE    = 4;
+
+reg [2:0]  state    = IDLE;
+reg [4:0]  bit_cnt  = 0;   // счётчик битов (0..15)
+reg [1:0]  clk_div  = 0;   // делитель тактового
+reg [11:0] shift_in = 0;   // принимаем данные
+reg [7:0]  shift_out = 0;  // отправляем конфиг
+reg [15:0] wait_cnt = 0;   // пауза между конверсиями
+
+// Обновляем каждые ~1мс (50000 тактов)
+parameter SAMPLE_RATE = 50000;
+
+always @(posedge clk or negedge reset_n) begin
+    if (!reset_n) begin
+        state     <= IDLE;
+        adc_convst <= 0;
+        adc_sck    <= 0;
+        adc_sdi    <= 0;
+        valid      <= 0;
+        wait_cnt   <= 0;
+        clk_div    <= 0;
+        bit_cnt    <= 0;
+    end
+    else begin
+        valid <= 0;  // по умолчанию
+
+        case (state)
+
+            // ----------------------------------------
+            // Ждём между измерениями
+            // ----------------------------------------
+            IDLE: begin
+                adc_sck    <= 0;
+                adc_convst <= 0;
+                if (wait_cnt == SAMPLE_RATE - 1) begin
+                    wait_cnt <= 0;
+                    state    <= CONVST;
+                end else
+                    wait_cnt <= wait_cnt + 1;
+            end
+
+            // ----------------------------------------
+            // Импульс CONVST — запуск конверсии
+            // Минимальная длительность ~20нс → 1 такт
+            // ----------------------------------------
+            CONVST: begin
+                adc_convst <= 1;
+                state      <= WAIT;
+                wait_cnt   <= 0;
+            end
+
+            // ----------------------------------------
+            // Ждём ~1.3мкс после CONVST (конверсия идёт)
+            // 1.3мкс × 50МГц = 65 тактов
+            // ----------------------------------------
+            WAIT: begin
+                adc_convst <= 0;
+                if (wait_cnt == 65) begin
+                    wait_cnt  <= 0;
+                    bit_cnt   <= 0;
+                    clk_div   <= 0;
+                    shift_out <= CH0_CFG;  // конфиг CH0
+                    shift_in  <= 0;
+                    state     <= TRANSFER;
+                end else
+                    wait_cnt <= wait_cnt + 1;
+            end
+
+            // ----------------------------------------
+            // SPI передача: 16 тактов
+            // На каждый такт SCK: выставляем SDI, читаем SDO
+            // ----------------------------------------
+            TRANSFER: begin
+                clk_div <= clk_div + 1;
+
+                if (clk_div == CLK_DIV - 1) begin
+                    // передний фронт SCK
+                    adc_sck <= 1;
+
+                    // выставляем следующий бит SDI (MSB first)
+                    if (bit_cnt < 8)
+                        adc_sdi <= shift_out[7 - bit_cnt];
+                    else
+                        adc_sdi <= 0;
+
+                end else if (clk_div == 2*CLK_DIV - 1) begin
+                    // задний фронт SCK — читаем SDO
+                    adc_sck  <= 0;
+                    clk_div  <= 0;
+
+                    // результат приходит начиная с бита 1
+                    // бит 0 = NULL, биты 1..12 = данные
+                    if (bit_cnt >= 1 && bit_cnt <= 12)
+                        shift_in <= {shift_in[10:0], adc_sdo};
+
+                    if (bit_cnt == 15) begin
+                        result <= shift_in;
+                        valid  <= 1;
+                        state  <= IDLE;
+                    end else
+                        bit_cnt <= bit_cnt + 1;
+                end
+            end
+
+        endcase
+    end
+end
+
+endmodule

@@ -1,0 +1,114 @@
+module laba8 (
+    input  wire        CLOCK_50,
+    input  wire [1:0]  KEY,
+    // ADC (пины из мануала Table 3-12)
+    output wire        ADC_CONVST,  // PIN_U9
+    output wire        ADC_SCK,     // PIN_V10
+    output wire        ADC_SDI,     // PIN_AC4
+    input  wire        ADC_SDO,     // PIN_AD4
+    // 7-сегментный дисплей
+    output reg  [6:0]  SEG,
+    output reg  [3:0]  DIG
+);
+
+// -------------------------------------------------------
+// Сброс по KEY[0]
+// -------------------------------------------------------
+reg k0_r1, k0_r2;
+wire reset_n = k0_r2;
+
+always @(posedge CLOCK_50) begin
+    k0_r1 <= KEY[0];
+    k0_r2 <= k0_r1;
+end
+
+// -------------------------------------------------------
+// ADC
+// -------------------------------------------------------
+wire [11:0] adc_result;
+wire        adc_valid;
+
+adc_ltc2308 u_adc (
+    .clk        (CLOCK_50),
+    .reset_n    (reset_n),
+    .adc_convst (ADC_CONVST),
+    .adc_sck    (ADC_SCK),
+    .adc_sdi    (ADC_SDI),
+    .adc_sdo    (ADC_SDO),
+    .result     (adc_result),
+    .valid      (adc_valid)
+);
+
+// -------------------------------------------------------
+// Перевод 12-битного значения в милливольты
+// Vref = 4096 мВ, разрядность 12 бит (4096 значений)
+// mV = result × 4096 / 4096 = result × 1
+// То есть result [0..4095] ≈ напряжение в мВ [0..4095]
+// Для отображения: показываем напряжение в мВ
+// -------------------------------------------------------
+reg [13:0] voltage_mv = 0;  // 0..4095 мВ
+
+always @(posedge CLOCK_50) begin
+    if (adc_valid)
+        voltage_mv <= adc_result;  // 1 LSB = 1 мВ при Vref=4.096V
+end
+
+// -------------------------------------------------------
+// Разбивка на цифры (показываем мВ: 0000..4095)
+// -------------------------------------------------------
+wire [3:0] d3 = voltage_mv / 1000;
+wire [3:0] d2 = (voltage_mv % 1000) / 100;
+wire [3:0] d1 = (voltage_mv % 100)  / 10;
+wire [3:0] d0 = voltage_mv % 10;
+
+// -------------------------------------------------------
+// Мультиплексирование дисплея
+// -------------------------------------------------------
+reg [16:0] mux_cnt = 0;
+reg [1:0]  mux_sel = 0;
+
+always @(posedge CLOCK_50) begin
+    if (mux_cnt == 25000 - 1) begin
+        mux_cnt <= 0;
+        mux_sel <= mux_sel + 1;
+    end else
+        mux_cnt <= mux_cnt + 1;
+end
+
+always @(*) begin
+    case (mux_sel)
+        2'd0: DIG = 4'b1110;
+        2'd1: DIG = 4'b1101;
+        2'd2: DIG = 4'b1011;
+        2'd3: DIG = 4'b0111;
+    endcase
+end
+
+reg [3:0] cur_digit;
+always @(*) begin
+    case (mux_sel)
+        2'd0: cur_digit = d0;
+        2'd1: cur_digit = d1;
+        2'd2: cur_digit = d2;
+        2'd3: cur_digit = d3;
+    endcase
+end
+
+// Декодер (Common Anode: 0 = горит)
+always @(*) begin
+    case (cur_digit)
+        4'd0: SEG = 7'b1000000;
+        4'd1: SEG = 7'b1111001;
+        4'd2: SEG = 7'b0100100;
+        4'd3: SEG = 7'b0110000;
+        4'd4: SEG = 7'b0011001;
+        4'd5: SEG = 7'b0010010;
+        4'd6: SEG = 7'b0000010;
+        4'd7: SEG = 7'b1111000;
+        4'd8: SEG = 7'b0000000;
+        4'd9: SEG = 7'b0010000;
+        default: SEG = 7'b1111111;
+    endcase
+end
+
+endmodule
